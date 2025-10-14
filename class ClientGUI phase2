@@ -1,0 +1,521 @@
+package Network_Project;
+
+ 
+
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.ActionEvent;
+import java.io.*;
+import java.net.Socket;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+
+
+
+import javax.swing.JOptionPane;
+
+public class ClientGUI extends JFrame {
+
+    // ====== Server connection settings ======
+    // غيّري هذا العنوان لعنوان جهاز السيرفر (IPv4) عندكم
+    private static final String SERVER_IP   = "localhost";
+    private static final int    SERVER_PORT = 9090;
+
+    // ====== Networking ======
+    private Socket socket;
+    private BufferedReader in;
+    private PrintWriter out;
+
+    // ====== Layout (frames via CardLayout) ======
+    private final CardLayout cards = new CardLayout();
+    private final JPanel root = new JPanel(cards);
+
+    // Frame identifiers
+    private static final String F_HOME    = "home";
+    private static final String F_AUTH    = "auth";
+    private static final String F_MY      = "my";      // NEW: شاشة حجوزاتي
+    private static final String F_DATE    = "date";
+    private static final String F_TYPE    = "type";
+    private static final String F_CONFIRM = "confirm";
+
+    // ====== State ======
+    private boolean signupMode = false;          // true = Sign up, false = Log in
+    private String  currentUser = null;          // set after REGISTER/LOGIN OK
+    private String  selectedStartISO = null;     // YYYY-MM-DD
+    private int     selectedDays = 1;            // 1..7
+
+    // ====== Frame 2 (Auth) ======
+    private final JTextField emailField = new JTextField(18);
+    private final JPasswordField passField = new JPasswordField(18);
+    private final JLabel authTitle = new JLabel("Log in", SwingConstants.CENTER);
+
+    // ====== NEW Frame (My bookings) ======
+    private final DefaultComboBoxModel<BookingItem> myModel = new DefaultComboBoxModel<>();
+    private final JComboBox<BookingItem> myBox = new JComboBox<>(myModel);
+    private final JButton myDeleteBtn = new JButton("Delete Selected");
+    private final JButton myNewBtn    = new JButton("New Booking");
+
+    // ====== Frame 3 (Date) ======
+    private final JComboBox<String> startDateBox = new JComboBox<>();
+    private final JSpinner daysSpinner = new JSpinner(new SpinnerNumberModel(1, 1, 7, 1));
+
+    // ====== Frame 4 (Type/Results) ======
+    private final JRadioButton rbManual = new JRadioButton("Manual");
+    private final JRadioButton rbAuto   = new JRadioButton("Auto", true);
+    private final JComboBox<String> seatsBox = new JComboBox<>(new String[]{"2", "5", "8"});
+    private final DefaultComboBoxModel<String> availModel = new DefaultComboBoxModel<>();
+    private final JComboBox<String> availBox = new JComboBox<>(availModel);
+    private final JButton reserveBtn = new JButton("Reserve");
+
+    // ====== Frame 5 (Confirmation) ======
+    private final JLabel confirmLabel = new JLabel("Your reservation is confirmed", SwingConstants.CENTER);
+
+    // ====== Date helpers ======
+    private static final DateTimeFormatter ISO   = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+    private static final DateTimeFormatter HUMAN = DateTimeFormatter.ofPattern("d/M/yyyy");
+
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(ClientGUI::new);
+    }
+
+    public ClientGUI() {
+        super("Car Rental");
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
+        setSize(560, 460);
+        setLocationRelativeTo(null);
+
+        // Build frames
+        root.add(buildHome(), F_HOME);
+        root.add(buildAuth(), F_AUTH);
+        root.add(buildMy(),   F_MY);     // NEW
+        root.add(buildDate(), F_DATE);
+        root.add(buildType(), F_TYPE);
+        root.add(buildConfirm(), F_CONFIRM);
+        setContentPane(root);
+
+        seedDateChoices(); // تواريخ تجريبية
+
+        // Connect to server (باستخدام SERVER_IP الثابت)
+        try {
+            socket = new Socket(SERVER_IP, SERVER_PORT);
+            in  = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            out = new PrintWriter(socket.getOutputStream(), true);
+            String greet = in.readLine(); // "OK CONNECTED"
+            System.out.println("[Server] " + greet);
+        } catch (IOException e) {
+            JOptionPane.showMessageDialog(this,
+                    "Cannot connect to server " + SERVER_IP + ":" + SERVER_PORT + "\n" + e.getMessage(),
+                    "Connection Error", JOptionPane.ERROR_MESSAGE);
+        }
+
+        cards.show(root, F_HOME);
+        setVisible(true);
+    }
+
+    // ====== Frame 1: Home ======
+    private JPanel buildHome() {
+        JPanel p = new JPanel(new GridBagLayout());
+        GridBagConstraints c = gbc();
+
+        JLabel title = bigLabel("Car Rental");
+        c.gridx=0; c.gridy=0; c.gridwidth=2; p.add(title, c);
+        c.gridwidth=1;
+
+        JButton loginBtn = new JButton("Log in");
+        JButton signupBtn = new JButton("Sign up");
+
+        c.gridy=1; p.add(loginBtn, c);
+        c.gridy=2; p.add(signupBtn, c);
+
+        loginBtn.addActionListener(e -> {
+            signupMode = false;
+            authTitle.setText("Log in");
+            emailField.setText("");
+            passField.setText("");
+            cards.show(root, F_AUTH);
+        });
+
+        signupBtn.addActionListener(e -> {
+            signupMode = true;
+            authTitle.setText("Sign up");
+            emailField.setText("");
+            passField.setText("");
+            cards.show(root, F_AUTH);
+        });
+
+        return p;
+    }
+
+    // ====== Frame 2: Auth ======
+    private JPanel buildAuth() {
+        JPanel p = new JPanel(new GridBagLayout());
+        GridBagConstraints c = gbc();
+
+        authTitle.setFont(authTitle.getFont().deriveFont(Font.BOLD, 18f));
+        c.gridx=0; c.gridy=0; c.gridwidth=2; p.add(authTitle, c);
+        c.gridwidth=1;
+
+        c.gridy=1; c.gridx=0; p.add(new JLabel("Email"), c);
+        c.gridx=1; p.add(emailField, c);
+
+        c.gridy=2; c.gridx=0; p.add(new JLabel("Password"), c);
+        c.gridx=1; p.add(passField, c);
+
+        JButton done = new JButton("Done");
+        c.gridy=3; c.gridx=0; c.gridwidth=2; p.add(done, c);
+
+        done.addActionListener(this::handleAuth);
+
+        return p;
+    }
+
+    private void handleAuth(ActionEvent e) {
+        String user = emailField.getText().trim();
+        String pass = new String(passField.getPassword());
+
+        if (user.isEmpty() || pass.isEmpty()) {
+            alert("Enter email and password.");
+            return;
+        }
+        runAsync(() -> {
+            try {
+                String cmd = (signupMode ? "REGISTER " : "LOGIN ") + user + " " + pass;
+                send(cmd);
+                String resp = read();
+                if (resp != null && resp.startsWith("OK")) {
+                    currentUser = user;
+                    info(signupMode ? "Signed up successfully." : "Logged in.");
+                    SwingUtilities.invokeLater(() -> {
+                        cards.show(root, F_MY);   // بعد النجاح نروح لحجوزاتي
+                        loadMyBookings();         // ونعرضها مباشرة
+                    });
+                } else {
+                    error(resp == null ? "No response" : resp);
+                }
+            } catch (IOException ex) {
+                error("Network error: " + ex.getMessage());
+            }
+        });
+    }
+
+    // ====== NEW Frame: My Bookings ======
+    private JPanel buildMy() {
+        JPanel p = new JPanel(new GridBagLayout());
+        GridBagConstraints c = gbc();
+
+        JLabel title = bigLabel("My Reservations");
+        c.gridx=0; c.gridy=0; c.gridwidth=2; p.add(title, c);
+        c.gridwidth=1;
+
+        myBox.setPrototypeDisplayValue(new BookingItem("BXXXXXXXX", "AXX", "2025-01-01", 7));
+        c.gridy=1; c.gridx=0; c.gridwidth=2; p.add(myBox, c);
+        c.gridwidth=1;
+
+        JPanel btns = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        btns.add(myNewBtn);
+        btns.add(myDeleteBtn);
+        c.gridy=2; c.gridx=0; c.gridwidth=2; p.add(btns, c);
+
+        myNewBtn.addActionListener(ev -> cards.show(root, F_DATE));
+        myDeleteBtn.addActionListener(ev -> doDeleteSelected());
+
+        return p;
+    }
+
+    private void loadMyBookings() {
+        myModel.removeAllElements();
+        myDeleteBtn.setEnabled(false);
+
+        runAsync(() -> {
+            try {
+                send("LIST");
+                String r = read();
+                SwingUtilities.invokeLater(() -> {
+                    if (r == null) { error("No response"); return; }
+                    if (r.equals("BOOKINGS")) {
+                        info("No bookings yet.");
+                        return;
+                    }
+                    if (!r.startsWith("BOOKINGS ")) { error(r); return; }
+                    String body = r.substring("BOOKINGS ".length()).trim();
+                    if (body.isEmpty()) return;
+                    for (String part : body.split(",")) {
+                        String[] a = part.trim().split(":");
+                        if (a.length == 4) {
+                            String id = a[0].trim();
+                            String car = a[1].trim();
+                            String start = a[2].trim();
+                            String days = a[3].trim().replace("x","").trim();
+                            myModel.addElement(new BookingItem(id, car, start, safeInt(days)));
+                        }
+                    }
+                    myDeleteBtn.setEnabled(myModel.getSize() > 0);
+                });
+            } catch (IOException ex) {
+                error("Network error: " + ex.getMessage());
+            }
+        });
+    }
+
+    private void doDeleteSelected() {
+        BookingItem item = (BookingItem) myBox.getSelectedItem();
+        if (item == null) { alert("Select a booking."); return; }
+
+        int ok = JOptionPane.showConfirmDialog(this,
+                "Cancel booking " + item.id + " ?", "Confirm",
+                JOptionPane.YES_NO_OPTION);
+        if (ok != JOptionPane.YES_OPTION) return;
+
+        runAsync(() -> {
+            try {
+                send("CANCEL bookingId=" + item.id);
+                String r = read();
+                SwingUtilities.invokeLater(() -> {
+                    if (r == null) { error("No response"); return; }
+                    info(r); // يتوقع "CANCELLED bookingId=..."
+                    loadMyBookings(); // حدث القائمة بعد الإلغاء
+                });
+            } catch (IOException ex) {
+                error("Network error: " + ex.getMessage());
+            }
+        });
+    }
+
+    // ====== Frame 3: Start date + number of days ======
+    private JPanel buildDate() {
+        JPanel p = new JPanel(new GridBagLayout());
+        GridBagConstraints c = gbc();
+
+        JLabel title = bigLabel("Start date");
+        c.gridx=0; c.gridy=0; c.gridwidth=2; p.add(title, c);
+        c.gridwidth=1;
+
+        c.gridy=1; c.gridx=0; p.add(new JLabel("Date"), c);
+        c.gridx=1; p.add(startDateBox, c);
+
+        c.gridy=2; c.gridx=0; p.add(new JLabel("Num of days"), c);
+        c.gridx=1; p.add(daysSpinner, c);
+
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JButton backHome = new JButton("Back");
+        JButton done = new JButton("Next");
+        row.add(backHome); row.add(done);
+        c.gridy=3; c.gridx=0; c.gridwidth=2; p.add(row, c);
+
+        backHome.addActionListener(ev -> cards.show(root, F_MY));
+        done.addActionListener(ev -> {
+            String human = (String) startDateBox.getSelectedItem();
+            if (human == null || human.isBlank()) { alert("Choose a start date."); return; }
+            selectedDays = (Integer) daysSpinner.getValue();
+            if (selectedDays < 1 || selectedDays > 7) { alert("Days must be between 1 and 7."); return; }
+            selectedStartISO = toISO(human);
+            cards.show(root, F_TYPE);
+        });
+
+        return p;
+    }
+
+    private void seedDateChoices() {
+        startDateBox.removeAllItems();
+        ArrayList<String> demo = new ArrayList<>();
+        demo.add("1/1/2025");
+        demo.add("2/1/2025");
+        demo.add("3/1/2025");
+        demo.add("4/1/2025");
+        demo.add("5/1/2025");
+        demo.add("6/1/2025");
+        demo.add("7/1/2025");
+        for (String d : demo) startDateBox.addItem(d);
+        startDateBox.setSelectedIndex(0);
+    }
+
+    // ====== Frame 4: Car type (+ seats), show cars, reserve ======
+    private JPanel buildType() {
+        JPanel p = new JPanel(new GridBagLayout());
+        GridBagConstraints c = gbc();
+
+        JLabel title = bigLabel("Car type");
+        c.gridx=0; c.gridy=0; c.gridwidth=3; p.add(title, c);
+        c.gridwidth=1;
+
+        ButtonGroup bg = new ButtonGroup();
+        bg.add(rbManual);
+        bg.add(rbAuto);
+
+        c.gridy=1; c.gridx=0; p.add(rbManual, c);
+        c.gridx=1; p.add(rbAuto, c);
+
+        c.gridy=2; c.gridx=0; p.add(new JLabel("Seats"), c);
+        c.gridx=1; p.add(seatsBox, c);
+
+        JButton showBtn = new JButton("Show available");
+        c.gridy=3; c.gridx=0; c.gridwidth=3; p.add(showBtn, c);
+        c.gridwidth=1;
+
+        JPanel listRow = new JPanel();
+        listRow.add(new JLabel("Available cars:"));
+        availBox.setPrototypeDisplayValue("MMMM");
+        listRow.add(availBox);
+        c.gridy=4; c.gridx=0; c.gridwidth=3; p.add(listRow, c);
+        c.gridwidth=1;
+
+        reserveBtn.setEnabled(false);
+        JButton backBtn = new JButton("Back");
+        JPanel actions = new JPanel();
+        actions.add(backBtn);
+        actions.add(reserveBtn);
+        c.gridy=5; c.gridx=0; c.gridwidth=3; p.add(actions, c);
+
+        showBtn.addActionListener(ev -> doSearch());
+        availBox.addActionListener(ev -> reserveBtn.setEnabled(availModel.getSize() > 0 && availBox.getSelectedItem()!=null));
+        reserveBtn.addActionListener(ev -> doReserve());
+        backBtn.addActionListener(ev -> cards.show(root, F_DATE));
+
+        return p;
+    }
+
+    private void doSearch() {
+        if (selectedStartISO == null) {
+            alert("Pick start date first.");
+            cards.show(root, F_DATE);
+            return;
+        }
+        String type = rbAuto.isSelected() ? "AUTO" : "MANUAL";
+        String seats = (String) seatsBox.getSelectedItem();
+        String cmd = "SEARCH type=" + type + " seats=" + seats + " start=" + selectedStartISO + " days=" + selectedDays;
+
+        runAsync(() -> {
+            try {
+                send(cmd);
+                String resp = read();
+                SwingUtilities.invokeLater(() -> {
+                    availModel.removeAllElements();
+                    if (resp == null) { error("No response."); return; }
+                    if ("NONE".equals(resp)) {
+                        info("No cars available for those inputs.");
+                        reserveBtn.setEnabled(false);
+                        return;
+                    }
+                    if (resp.startsWith("AVAILABLE ")) {
+                        String list = resp.substring(10);
+                        for (String id : list.split(",")) {
+                            String trimmed = id.trim();
+                            if (!trimmed.isEmpty()) availModel.addElement(trimmed);
+                        }
+                        reserveBtn.setEnabled(availModel.getSize() > 0);
+                    } else {
+                        error(resp);
+                        reserveBtn.setEnabled(false);
+                    }
+                });
+            } catch (IOException ex) {
+                error("Network error: " + ex.getMessage());
+            }
+        });
+    }
+
+    private void doReserve() {
+        String carId = (String) availBox.getSelectedItem();
+        if (carId == null) { alert("Select a car."); return; }
+        String cmd = "RESERVE car=" + carId + " start=" + selectedStartISO + " days=" + selectedDays;
+
+        runAsync(() -> {
+            try {
+                send(cmd);
+                String resp = read();
+                if (resp != null && resp.startsWith("CONFIRMED ")) {
+                    SwingUtilities.invokeLater(() -> {
+                        confirmLabel.setText("<html>Your reservation is confirmed.<br/>" + resp + "</html>");
+                        // بعد التأكيد نرجع إلى حجوزاتي ونحدثها
+                        loadMyBookings();
+                        cards.show(root, F_CONFIRM);
+                    });
+                } else {
+                    error(resp == null ? "No response" : resp);
+                }
+            } catch (IOException ex) {
+                error("Network error: " + ex.getMessage());
+            }
+        });
+    }
+
+    // ====== Frame 5: Confirmation ======
+    private JPanel buildConfirm() {
+        JPanel p = new JPanel(new GridBagLayout());
+        GridBagConstraints c = gbc();
+
+        confirmLabel.setFont(confirmLabel.getFont().deriveFont(Font.BOLD, 16f));
+        c.gridx=0; c.gridy=0; c.gridwidth=2; p.add(confirmLabel, c);
+        c.gridwidth=1;
+
+        JButton done = new JButton("Done");
+        c.gridy=1; c.gridx=0; c.gridwidth=2; p.add(done, c);
+
+        done.addActionListener(ev -> {
+            // ارجعي لشاشة حجوزاتي مباشرة
+            availModel.removeAllElements();
+            reserveBtn.setEnabled(false);
+            loadMyBookings();
+            cards.show(root, F_MY);
+        });
+
+        return p;
+    }
+
+    // ====== Utilities ======
+    private GridBagConstraints gbc() {
+        GridBagConstraints c = new GridBagConstraints();
+        c.insets = new Insets(8, 8, 8, 8);
+        c.fill = GridBagConstraints.HORIZONTAL;
+        return c;
+    }
+
+    private JLabel bigLabel(String text) {
+        JLabel l = new JLabel(text, SwingConstants.LEFT);
+        l.setFont(l.getFont().deriveFont(Font.BOLD, 18f));
+        return l;
+    }
+
+    // Convert "d/M/yyyy" (e.g., "1/1/2025") to "yyyy-MM-dd"
+    private String toISO(String human) {
+        LocalDate d = LocalDate.parse(human, HUMAN);
+        return d.format(ISO);
+    }
+
+    private int safeInt(String s) {
+        try { return Integer.parseInt(s); } catch (Exception e) { return 0; }
+    }
+
+    private void runAsync(Runnable r) { // simple background worker
+        new SwingWorker<Void,Void>() {
+            @Override protected Void doInBackground() { r.run(); return null; }
+        }.execute();
+    }
+
+    private void send(String s) throws IOException {
+        if (out == null) throw new IOException("Not connected.");
+        out.println(s);
+    }
+
+    private String read() throws IOException {
+        if (in == null) throw new IOException("Not connected.");
+        return in.readLine();
+    }
+
+    private void alert(String msg) { JOptionPane.showMessageDialog(this, msg, "Notice", JOptionPane.INFORMATION_MESSAGE); }
+    private void info(String msg)  { JOptionPane.showMessageDialog(this, msg, "Info", JOptionPane.INFORMATION_MESSAGE); }
+    private void error(String msg) { JOptionPane.showMessageDialog(this, msg, "Error", JOptionPane.ERROR_MESSAGE); }
+
+    // عنصر يمثل حجز واحد داخل الـComboBox (يعرض نص مرتب ويحتفظ بالـid)
+    private static class BookingItem {
+        final String id, car, start;
+        final int days;
+        BookingItem(String id, String car, String start, int days) {
+            this.id=id; this.car=car; this.start=start; this.days=days;
+        }
+        @Override public String toString() {
+            return id + "  -  " + car + "  -  " + start + "  -  x" + days;
+        }
+    }
+}
