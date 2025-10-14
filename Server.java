@@ -24,13 +24,15 @@ public class Server {
      // availability index: date -> set of carIds booked that day
     final Map<LocalDate, Set<String>> occupancyByDate = new ConcurrentHashMap<>();
     
-    /* username -> list of bookingIds
-    IN PHASE 2
+    // username -> list of bookingIds
+    
     final Map<String, List<String>> userBookings = new ConcurrentHashMap<>();
    
-     username -> password
+     //username -> password
     final Map<String, String> users = new ConcurrentHashMap<>();
-    */
+   
+    
+       private static final ArrayList<ClientHandler> clients = new ArrayList<>();
     //============ START HERE=========
        public static void main(String[] args) throws IOException {
         Server server = new Server();
@@ -41,16 +43,114 @@ public class Server {
                 Socket client = serverSocket.accept();
                 System.out.println("Connected to client");
                 ClientHandler clientThread = new ClientHandler(client, clients, server); // pass shared server
-                synchronized (clients) { clients.add(clientThread); }
+                clients.add(clientThread); 
                 new Thread(clientThread).start();
             } // while
         } // try-with-resources
     } // main
     
+      private void seedInventory() {
+        // AUTO: A01..A10 (2: A01-03, 5: A04-07, 8: A08-10)
+        addCar("A01", "AUTO", 2); addCar("A02", "AUTO", 2); addCar("A03", "AUTO", 2);
+        addCar("A04", "AUTO", 5); addCar("A05", "AUTO", 5); addCar("A06", "AUTO", 5); addCar("A07", "AUTO", 5);
+        addCar("A08", "AUTO", 8); addCar("A09", "AUTO", 8); addCar("A10", "AUTO", 8);
+        // MANUAL: M01..M10 (2: M01-03, 5: M04-07, 8: M08-10)
+        addCar("M01", "MANUAL", 2); addCar("M02", "MANUAL", 2); addCar("M03", "MANUAL", 2);
+        addCar("M04", "MANUAL", 5); addCar("M05", "MANUAL", 5); addCar("M06", "MANUAL", 5); addCar("M07", "MANUAL", 5);
+        addCar("M08", "MANUAL", 8); addCar("M09", "MANUAL", 8); addCar("M10", "MANUAL", 8);
+        System.out.println("[Server] Seeded 20 cars.");
+    }// end of seedInventory
+
+      private void addCar(String id, String type, int seats)
+      { cars.put(id, new Car(id, type, seats)); }// end of addCar
     
-    
-    
-    
+        // ===== API used by NewClient =====
+
+    public String register(String user, String pass) {
+        if (isBlank(user) || isBlank(pass)) return "ERROR message=BadRegisterInput";
+        String prev = users.putIfAbsent(user, pass);
+        if (prev != null) return "ERROR message=UserExists";
+        userBookings.put(user, Collections.synchronizedList(new ArrayList<>()));
+        return "OK REGISTERED";
+    }
+
+    public String login(String user, String pass) {
+        String p = users.get(user);
+        if (p == null || !p.equals(pass)) return "ERROR message=InvalidCredentials";
+        return "OK LOGGED_IN";
+    }
+
+    public String search(String type, int seats, LocalDate start, int days) {
+        if (!"AUTO".equals(type) && !"MANUAL".equals(type)) return "ERROR message=BadType";
+        if (!(seats == 2 || seats == 5 || seats == 8)) return "ERROR message=BadSeats";
+        if (days < 1 || days > 7) return "ERROR message=BadDays";
+        List<String> available = new ArrayList<>();
+        for (Car c : cars.values()) {
+            if (!c.getType().equals(type) || c.getNumOfSeates() != seats) continue;
+            if (isRangeAvailable(c.getCarId(), start, days)) available.add(c.getCarId());
+        }
+        if (available.isEmpty()) return "NONE";
+        Collections.sort(available);
+        return "AVAILABLE " + String.join(",", available);
+    }
+
+    public synchronized String reserve(String username, String carId, LocalDate start, int days) {
+        if (!cars.containsKey(carId)) return "ERROR message=NoSuchCar";
+        if (days < 1 || days > 7) return "ERROR message=BadDays";
+        if (!isRangeAvailable(carId, start, days)) return "ERROR message=NotAvailable";
+        // mark each day in [start, start+days)
+        for (int i = 0; i < days; i++) {
+            LocalDate d = start.plusDays(i);
+            occupancyByDate.computeIfAbsent(d, k -> ConcurrentHashMap.newKeySet()).add(carId);
+        }
+        String bid = "B" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+        Reservation r = new Reservation(bid, username, carId, start, days);
+        bookingsById.put(bid, r);
+        userBookings.computeIfAbsent(username, k -> Collections.synchronizedList(new ArrayList<>())).add(bid);
+        return "CONFIRMED bookingId=" + bid;
+    }
+
+    public String listBookings(String username) {
+        List<String> ids = userBookings.getOrDefault(username, List.of());
+        if (ids.isEmpty()) return "BOOKINGS";
+        StringBuilder sb = new StringBuilder("BOOKINGS ");
+        for (int i = 0; i < ids.size(); i++) {
+            Reservation r = bookingsById.get(ids.get(i));
+            if (r != null) {
+                sb.append(r.getId()).append(":").append(r.getCarId()).append(":")
+                  .append(r.getStartDate()).append(":x").append(r.getDays());
+                if (i < ids.size() - 1) sb.append(",");
+            }
+        }
+        return sb.toString();
+    }
+
+    public synchronized String cancel(String username, String bookingId) {
+        Reservation r = bookingsById.get(bookingId);
+        if (r == null) return "ERROR message=NoSuchBooking";
+        if (!r.getUsername().equals(username)) return "ERROR message=Forbidden";
+        for (int i = 0; i < r.getDays(); i++) {
+            LocalDate d = r.getStartDate().plusDays(i);
+            Set<String> set = occupancyByDate.get(d);
+            if (set != null) set.remove(r.getCarId());
+        }
+        bookingsById.remove(bookingId);
+        userBookings.getOrDefault(username, new ArrayList<>()).remove(bookingId);
+        return "CANCELLED";
+    }
+
+    // ===== helpers =====
+    private boolean isRangeAvailable(String carId, LocalDate start, int days) {
+        for (int i = 0; i < days; i++) {
+            LocalDate d = start.plusDays(i);
+            Set<String> set = occupancyByDate.get(d);
+            if (set != null && set.contains(carId)) return false;
+        }
+        return true;
+    }
+    private boolean isBlank(String s) { return s == null || s.trim().isEmpty(); }
+}
+
     
     
     
@@ -64,4 +164,3 @@ public class Server {
     
     
    
-}//end of class 
